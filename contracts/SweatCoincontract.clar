@@ -85,3 +85,45 @@
 (define-public (get-user-prediction (user principal))
   (get user-predictions user)
 )
+
+
+;; read-only functions
+(define-read-only (is-physical-activity-verified? (steps uint) (user principal))
+  (let ((user-steps (get user-steps user)))
+    (if (>= steps activity-verification-threshold)
+      (ok true)
+      (err "Activity not verified")
+    )
+  )
+)
+
+(define-read-only (get-user-mintable-amount (user principal))
+  (let ((steps (get user-steps user)))
+    (ok (* steps 10))
+  )
+)
+
+;; private functions
+(define-private (mint (amount uint) (to principal))
+  (begin
+    (update-map user-balances to (add (get user-balances to) amount))
+    (ok "Tokens minted successfully")
+  )
+)
+
+(define-private (transfer-tokens (amount uint) (to principal))
+  (begin
+    ;; Transfer logic - assuming transfer to gym or health service contract
+    ;; This will interface with external services (via oracle or API).
+    (ok "Tokens transferred")
+  )
+)
+
+;; Example of updating user's steps via oracle
+(define-public (update-steps (steps uint) (user principal))
+  (begin
+    (update-map user-steps user steps)
+    (ok "Steps updated successfully")
+  )
+)
+
