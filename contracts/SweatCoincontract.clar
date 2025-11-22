@@ -35,6 +35,9 @@
 (define-constant RATE_LIMIT_BLOCKS u10)
 (define-constant MAX_STEPS_PER_UPDATE u100000)
 
+;; Reentrancy guard
+(define-data-var reentrancy-guard bool true)
+
 (define-public (mint-tokens (steps uint) (user principal))
   (begin
     (asserts! (not (var-get contract-paused)) ERR_CONTRACT_PAUSED)
@@ -58,12 +61,15 @@
 
 ;; Data maps
 (define-map user-steps principal uint) ;; Track user's steps
-
-;; Data maps
 (define-map user-balances principal uint) ;; Track balances of SWEAT tokens
 (define-map user-stakes principal uint)   ;; Track staked tokens
 (define-map user-predictions principal uint) ;; Track user's health prediction (e.g. weight loss goal)
 (define-map last-update-block principal uint) ;; Rate limiting
+
+;; Batch operations data structures
+(define-data-var next-batch-id uint u0)
+(define-map batch-steps {batch-id: uint, user: principal} {steps: uint, verified: bool})
+(define-map batch-transfers {batch-id: uint, user: principal} {amount: uint, recipient: principal})
 
 ;; Security helper functions
 
@@ -87,6 +93,29 @@
         (last-block (default-to u0 (map-get? last-update-block user))))
     (asserts! (>= (- current-block last-block) RATE_LIMIT_BLOCKS) ERR_RATE_LIMIT_EXCEEDED)
     (map-set last-update-block user current-block)
+    (ok true)))
+
+;; Reentrancy protection
+(define-private (non-reentrant)
+  (let ((guard (var-get reentrancy-guard)))
+    (asserts! guard ERR_UNAUTHORIZED)
+    (var-set reentrancy-guard false)
+    (ok true)))
+
+(define-private (release-guard)
+  (begin
+    (var-set reentrancy-guard true)
+    (ok true)))
+
+;; Enhanced validation helpers
+(define-private (validate-principal (user principal))
+  (begin
+    (asserts! (not (is-eq user (as-contract tx-sender))) ERR_INVALID_INPUT)
+    (ok true)))
+
+(define-private (validate-amount (amount uint) (min-amount uint))
+  (begin
+    (asserts! (>= amount min-amount) ERR_INVALID_AMOUNT)
     (ok true)))
 
 ;; public functions
@@ -113,18 +142,18 @@
         (staked (default-to u0 (map-get? user-stakes user)))
       )
     (asserts! (not (var-get contract-paused)) ERR_CONTRACT_PAUSED)
+    (asserts! (not (is-eq user (as-contract tx-sender))) ERR_INVALID_INPUT)
     (asserts! (>= amount MIN_STAKE_AMOUNT) ERR_INVALID_AMOUNT)
-    (asserts! (>= bal amount) ERR_INSUFFICIENT_BALANCE)
+    (asserts! (<= amount bal) ERR_INSUFFICIENT_BALANCE)
     (asserts! (> prediction u0) ERR_INVALID_INPUT)
-    (let (
-      (new-balance (unwrap! (safe-sub bal amount) ERR_UNDERFLOW))
-      (new-staked (unwrap! (safe-add staked amount) ERR_OVERFLOW))
-    )
-      (map-set user-balances user new-balance)
-      (map-set user-stakes user new-staked)
-      (map-set user-predictions user prediction)
-      (ok true)
-    )
+    (asserts! (<= prediction u1000) ERR_INVALID_INPUT)
+    (asserts! (var-get reentrancy-guard) ERR_UNAUTHORIZED)
+    (var-set reentrancy-guard false)
+    (map-set user-balances user (- bal amount))
+    (map-set user-stakes user (+ staked amount))
+    (map-set user-predictions user prediction)
+    (var-set reentrancy-guard true)
+    (ok true)
   )
 )
 
@@ -134,24 +163,23 @@
         (bal (default-to u0 (map-get? user-balances user)))
       )
     (asserts! (not (var-get contract-paused)) ERR_CONTRACT_PAUSED)
+    (asserts! (not (is-eq user (as-contract tx-sender))) ERR_INVALID_INPUT)
     (asserts! (>= amount MIN_REDEEM_AMOUNT) ERR_INVALID_AMOUNT)
-    (asserts! (>= bal amount) ERR_INSUFFICIENT_BALANCE)
-    (let ((new-balance (unwrap! (safe-sub bal amount) ERR_UNDERFLOW)))
-      ;; Update balance first (reentrancy protection)
-      (map-set user-balances user new-balance)
-      ;; Transfer tokens to gym or health services (stub)
-      ;; Note: transfer-tokens is a stub that always succeeds
-      (ok true)
-    )
+    (asserts! (<= amount bal) ERR_INSUFFICIENT_BALANCE)
+    (asserts! (var-get reentrancy-guard) ERR_UNAUTHORIZED)
+    (var-set reentrancy-guard false)
+    ;; Update balance first (reentrancy protection)
+    (map-set user-balances user (- bal amount))
+    ;; Transfer tokens to gym or health services (stub)
+    ;; Note: transfer-tokens is a stub that always succeeds - removed to avoid compilation issues
+    ;; (transfer-tokens amount gym-partners-address)
+    (var-set reentrancy-guard true)
+    (ok true)
   )
 )
 
 (define-public (get-user-balance (user principal))
   (ok (default-to u0 (map-get? user-balances user)))
-)
-
-(define-public (get-user-steps (user principal))
-  (ok (default-to u0 (map-get? user-steps user)))
 )
 
 (define-public (get-user-staked-tokens (user principal))
@@ -197,9 +225,11 @@
 )
 
 (define-private (transfer-tokens (amount uint) (to principal))
-  ;; Transfer logic - assuming transfer to gym or health service contract
-  ;; This will interface with external services (via oracle or API).
-  (ok true)
+  (begin
+    ;; Transfer logic - assuming transfer to gym or health service contract
+    ;; This will interface with external services (via oracle or API).
+    (ok true)
+  )
 )
 
 ;; Example of updating user's steps via oracle
